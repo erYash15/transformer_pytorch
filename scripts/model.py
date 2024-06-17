@@ -322,7 +322,7 @@ class Transformer(nn.Module):
         self.src_embed = src_embed
         self.tgt_embed = tgt_embed
         self.src_pos = src_pos
-        self.src_tgt = tgt_pos
+        self.tgt_pos = tgt_pos
         self.projection_layer = projection_layer
 
     def encode(self, src, src_mask):
@@ -331,8 +331,8 @@ class Transformer(nn.Module):
         return self.encoder(src, src_mask)
     
     def decode(self, encoder_output, src_mask, tgt, tgt_mask):
-        tgt = self.src_embed(tgt)
-        tgt = self.src_pos(tgt)
+        tgt = self.tgt_embed(tgt)
+        tgt = self.tgt_pos(tgt)
         return self.decoder(tgt, encoder_output, src_mask, tgt_mask)
     
     def project(self, x):
