@@ -6,81 +6,120 @@ import torch.nn.functional as F
 # InputEmbeddings
 
 class InputEmbeddings(nn.Module):
-    
+    """
+    Input Embeddings Class
+    """
     def __init__(self, d_model: int, vocab_size: int):
         super().__init__()
         self.d_model = d_model
         self.vocab_size = vocab_size
+        # Define the embedding layer
         self.embedding = nn.Embedding(vocab_size, d_model)
 
     def forward(self, x):
+        # Compute embeddings and scale them by sqrt(d_model)
         return self.embedding(x) * math.sqrt(self.d_model)
 
 
 # PositionalEncoding
 
 class PositionalEncoding(nn.Module):
-    
+    """
+    Positional Encoding Class
+    """
     def __init__(self, d_model: int, seq_len: int, dropout: float, div_term_implementation: str = 'modified') -> None:
         super().__init__()
         self.d_model = d_model
         self.seq_len = seq_len
         self.dropout = nn.Dropout(dropout)
 
+        # Create a matrix of shape (seq_len, d_model) for positional encodings
         pe = torch.zeros(seq_len, d_model)
+        # Create a vector of shape (seq_len, 1) for position indices
         position = torch.arange(0, seq_len, dtype=torch.float).unsqueeze(1)
 
+        # Calculate the division term based on the specified implementation
         if div_term_implementation == 'original':
             div_term = 1.0 / (10000 ** (torch.arange(0, d_model, 2).float() / d_model))
         else:
             div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
 
+        # Apply sine to even indices and cosine to odd indices
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
+
+        # Add an extra dimension for batch size
         pe = pe.unsqueeze(0)
 
+        # Register the positional encoding matrix as a buffer
         self.register_buffer('pe', pe)
 
     def forward(self, x):
+        # Add positional encoding to the input tensor and disable gradient computation
         x = x + (self.pe[:, :x.shape[1],]).requires_grad_(False)
         return self.dropout(x)
+
 
 
 # LayerNormalization
 
 class LayerNormalization(nn.Module):
-    
-    def __init__(self, eps: float = 10**-6):
+    """
+    Layer Normalization Class
+    """
+    def __init__(self, features: int, eps: float = 10**-6):
         super().__init__()
         self.eps = eps
-        # Learnable scaling parameter
-        self.alpha = nn.Parameter(torch.ones(1))
-        # Learnable bias parameter
-        self.bias = nn.Parameter(torch.zeros(1))
+        self.alpha = nn.Parameter(torch.ones(features))        # Learnable scaling parameter
+        self.bias = nn.Parameter(torch.zeros(features))         # Learnable bias parameter
 
     def forward(self, x):
-        mean = x.mean(dim=-1, keepdim=True)
-        std = x.std(dim=-1, keepdim=True)
+        """
+        Forward pass for the layer normalization.
+
+        Args:
+            x (torch.Tensor): Input tensor to be normalized.
+
+        Returns:
+            torch.Tensor: Normalized input tensor with learnable scaling and bias.
+        """
+
+        # x: (batch, seq_len, hidden_size)
+        mean = x.mean(dim=-1, keepdim=True) # (batch, seq_len, 1)
+        std = x.std(dim=-1, keepdim=True) # (batch, seq_len, 1)
+        # Apply normalization, scaling, and bias
         return self.alpha * (x - mean) / (std + self.eps) + self.bias
+
 
 # FeedForwardBlock
 
 class FeedForwardBlock(nn.Module):
-    
+    """
+    FeedForward Block Class
+    """
     def __init__(self, d_model: int, d_ff: int, dropout: float) -> None:
         super().__init__()
+        # First linear layer with input size d_model and output size d_ff
         self.linear_1 = nn.Linear(d_model, d_ff) # W1 and B1
+        # Dropout layer
         self.dropout = nn.Dropout(dropout)
+        # Second linear layer with input size d_ff and output size d_model
         self.linear_2 = nn.Linear(d_ff, d_model) # W2 and B2
 
     def forward(self, x):
+        # Apply the first linear layer, ReLU activation, dropout, and then the second linear layer
+        # (Batch, Seq_len, d_model) -> (Batch, Seq_len, d_ff) -> (Batch, Seq_len, d_model)
         return self.linear_2(self.dropout(torch.relu(self.linear_1(x))))
+
 
 
 # MultiHeadAttentionBlock
 
 class MultiHeadAttentionBlock(nn.Module):
-    def __init__(self, d_model, h: int, dropout: float):
+    """
+    Multi-Head Attention Block Class
+    """
+    def __init__(self, d_model: int, h: int, dropout: float):
         super().__init__()
         self.d_model = d_model
         self.h = h
@@ -96,105 +135,149 @@ class MultiHeadAttentionBlock(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
     @staticmethod 
-    def attention(query, key, value, mask, dropout):
+    def attention(query, key, value, mask, dropout: nn.Dropout):
         d_k = query.shape[-1]
+        
+        # (Batch, h, seq_len, d_k) -> (Batch, h, seq_len, seq_len)
         attention_scores = (query @ key.transpose(-2, -1)) / math.sqrt(d_k)
 
         if mask is not None:
+            # very low value (indicateing -inf) to positions where mask == 0
             attention_scores.masked_fill(mask==0,-1e9)
 
         attention_scores = attention_scores.softmax(dim = -1) # (Batch, h, seq_len, seq_len)
-
+        
         if dropout is not None:
             attention_scores = dropout(attention_scores)
-
+        # (batch. h. seq_len, seq_len) -> (batch, h, seq_len, d_k)
+        # also resturn attention scores used for visualization
         return (attention_scores @ value), attention_scores        
 
     def forward(self, q, k, v, mask):
+        # Apply linear layers to get query, key, and value tensors
         query = self.w_q(q) # (Batch, Seq_Len, d_model) -> (Batch, Seq_Len, d_model)
         key = self.w_k(k) # (Batch, Seq_Len, d_model) -> (Batch, Seq_Len, d_model)
         value = self.w_v(v) # (Batch, Seq_Len, d_model) -> (Batch, Seq_Len, d_model)
 
+        # (Batch, Seq_Len, d_model) -> (Batch, Seq_Len, h, d_k) -> (Batch, h, Seq_Len, d_k)
         query = query.view(query.shape[0], query.shape[1], self.h, self.d_k).transpose(1,2)
         key = key.view(key.shape[0], key.shape[1], self.h, self.d_k).transpose(1,2)
         value = value.view(value.shape[0], value.shape[1], self.h, self.d_k).transpose(1,2)
+        
+        # Apply the attention mechanism
         x, self.attention_scores = MultiHeadAttentionBlock.attention(query, key, value, mask, self.dropout)
+
+        # Reshape and transpose back to the original shape
+        # (Batch, h, seq_len, d_k) -> (Batch, seq_len, h, d_k) -> (Batch, seq_len, d_model)
         x = x.transpose(1,2).contiguous().view(x.shape[0], -1, self.h*self.d_k)
+
+        # Apply the final linear layer (Batch, seq_len, d_model)
         return self.w_o(x)
+
+    
 
     
 # ResidualConnection
 
 class ResidualConnection(nn.Module):
-
-    def __init__(self, dropout: float) -> None:
+    """
+    Residual Connection with Layer Normalization.
+    """
+    def __init__(self, features: int, dropout: float) -> None:
         super().__init__()
         self.dropout = nn.Dropout(dropout)
-        self.norm = LayerNormalization()
+        self.norm = LayerNormalization(features)
 
     def forward(self, x, sublayer):
+        # Norm and Add
         return x + self.dropout(sublayer(self.norm(x)))
+
 
 
 # EncoderBlock
 
 class EncoderBlock(nn.Module):
 
-    def __init__(self, self_attention_block: MultiHeadAttentionBlock, feed_forward_block: FeedForwardBlock, dropout: float) -> None:
+    def __init__(self, features: int, self_attention_block: MultiHeadAttentionBlock, feed_forward_block: FeedForwardBlock, dropout: float) -> None:
+        """
+        Encoder Block for a Transformer model.
+        """
         super().__init__()
         self.self_attention_block = self_attention_block
         self.feed_forward_block = feed_forward_block
-        self.residual_connections = nn.ModuleList([ResidualConnection(dropout) for _ in range(2)])
+        self.residual_connections = nn.ModuleList([ResidualConnection(features, dropout) for _ in range(2)])
 
     def forward(self, x, src_mask):
+        # Apply the first residual connection with the self-attention block
         x = self.residual_connections[0](x, lambda x: self.self_attention_block(x, x, x, src_mask))  # try without lambda
+
+        # Apply the second residual connection with the feed-forward block
         x = self.residual_connections[1](x, lambda x: self.feed_forward_block(x))
         return x
-
 
 # Encoder
 
 class Encoder(nn.Module):
-    def __init__(self, layers: nn.ModuleList) -> None:
+    """
+    Encoder block for a Transformer model.
+    """
+    def __init__(self, features: int, layers: nn.ModuleList) -> None:
         super().__init__()
         self.layers = layers
-        self.norm = LayerNormalization()  # Initialize layer normalization
+        self.norm = LayerNormalization(features)  # Initialize layer normalization
 
     def forward(self, x, mask):
         for layer in self.layers:
             x = layer(x, mask)  # Apply each layer in the list to the input
         return self.norm(x)  # Apply layer normalization to the final output
 
-
 # DecoderBlock
 
 class DecoderBlock(nn.Module):
+    """
+    Decoder block for a Transformer model.
+
+    This block consists of a self-attention mechanism, a cross-attention mechanism (attending to encoder output),
+    and a feed-forward network. Each sublayer is followed by a residual connection and layer normalization.
+    """
     def __init__(
             self, 
+            features: int,
             self_attention_block: MultiHeadAttentionBlock, 
             cross_attention_block: MultiHeadAttentionBlock,
             feed_forward_block: FeedForwardBlock,
             dropout: float = 0.1
         ) -> None:
+        """
+        Initializes the DecoderBlock with self-attention, cross-attention, feed-forward blocks,
+        and residual connections.
+         """
         super().__init__()
         self.self_attention_block = self_attention_block  # Self-attention mechanism
         self.cross_attention_block = cross_attention_block  # Cross-attention mechanism
         self.feed_forward_block = feed_forward_block  # Feed-forward network
-        self.residual_connections = nn.ModuleList([ResidualConnection(dropout) for _ in range(3)])  # Residual connections with dropout
+        self.residual_connections = nn.ModuleList([ResidualConnection(features, dropout) for _ in range(3)])  # Residual connections with dropout
 
     def forward(self, x, encoder_output, src_mask, tgt_mask):
+        # Apply the first residual connection with the self-attention block
         x = self.residual_connections[0](x, lambda x: self.self_attention_block(x, x, x, tgt_mask))
+        # Apply the second residual connection with the cross-attention block
         x = self.residual_connections[1](x, lambda x: self.cross_attention_block(x, encoder_output, encoder_output, src_mask))
+        # Apply the third residual connection with the feed-forward block
         x = self.residual_connections[2](x, lambda x: self.feed_forward_block(x))
+
         return x  # Return the final output tensor
 
 # Decoder
 
 class Decoder(nn.Module):
-    def __init__(self, layers: nn.ModuleList) -> None:
+    """
+    Decoder for a Transformer model.
+    """
+    def __init__(self, features: int, layers: nn.ModuleList) -> None:
         super().__init__()
         self.layers = layers  # List of decoder layers
-        self.norm = LayerNormalization()  # Initialize layer normalization
+        self.norm = LayerNormalization(features)  # Initialize layer normalization
 
     def forward(self, x, encoder_output, src_mask, tgt_mask):
         for layer in self.layers:
@@ -202,12 +285,19 @@ class Decoder(nn.Module):
 
         return self.norm(x)  # Apply layer normalization to the final output
 
+
+# Projection Layer
+
 class ProjectionLayer(nn.Module):
+    """
+    Projection layer for a Transformer model.
+    """
     def __init__(self, d_model: int, vocab_size: int) -> None:
         super().__init__()
         self.proj = nn.Linear(d_model, vocab_size)  # Linear layer to project to vocabulary size
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # (batch_size, seq_len, d_model) -> (batch_size, seq_len, vocab_size)
         return F.log_softmax(self.proj(x), dim=-1)  # Apply linear projection and log softmax
 
 
@@ -300,6 +390,7 @@ def build_transformer(
     # Initialize the parameter
     for p in transformer.parameters():
         if p.dim() > 1:
-            nn.init.xavier_uniform(p)
+            nn.init.xavier_uniform_(p)
         
-    return transformers
+    return transformer
+    
